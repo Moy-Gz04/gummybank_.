@@ -214,16 +214,33 @@ const lockIcon = document.getElementById("lock-icon");
 if (lockIcon) {
   lockIcon.addEventListener("click", () => {
     const usuario = prompt("Usuario:");
+    if (usuario == null) return; // Cancelado
     const contrasena = prompt("Contraseña:");
+    if (contrasena == null) return; // Cancelado
 
     if (usuario === "admin" && contrasena === "1234") {
+      // Acceso al panel de administrador
       sessionStorage.setItem("auth", "true");
       window.location.href = "admin.html";
-    } else {
+    } else if (usuario === "panel" && contrasena === "12345") {
+      // Acceso directo al panel de ventas
+      sessionStorage.setItem("ventas_auth", "true");
+      window.location.href = "ventas.html";
+    } else if (usuario === "vendedor" && contrasena === "123456") {
+      // Acceso directo al panel de ventas
+      sessionStorage.setItem("vendedor_auth", "true");
+      window.location.href = "premios.html";
+    }else if (usuario === "registroven" && contrasena === "1234567") {
+      // Acceso directo al panel de ventas
+      sessionStorage.setItem("registro_auth", "true");
+      window.location.href = "registro-premios.html";
+    }
+    else {
       alert("Acceso denegado. Usuario o contraseña incorrectos.");
     }
   });
 }
+
 
 // =====================
 //  MODAL INFO
