@@ -7,8 +7,8 @@ import {
   updateDoc,
   collection,
   getDocs,
-  writeBatch,
-  serverTimestamp
+  serverTimestamp,
+  runTransaction
 } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
 
 // === CONFIGURACIÓN FIREBASE ===
@@ -25,13 +25,11 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
+// Normaliza el ID del documento (MAYÚSCULAS, sin espacios ni símbolos)
+const toId = s => (s || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+
 // === METAS DE BÓVEDAS ===
-const metas = {
-  madera: 25,
-  cristal: 100,
-  plateada: 250,
-  dorada: 500
-};
+const metas = { madera: 25, cristal: 100, plateada: 250, dorada: 500 };
 
 // === CONTADORES (lee tamaño de colección por ahora) ===
 async function cargarContadores() {
@@ -39,7 +37,6 @@ async function cargarContadores() {
     const ref = collection(db, boveda);
     const snap = await getDocs(ref);
     const cantidad = snap.size;
-
     const contador = document.querySelector(`.vault.${boveda} .count`);
     if (contador) contador.textContent = cantidad;
   }
@@ -85,38 +82,46 @@ if (form) {
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
 
-    const codigo = document.getElementById("codigo")?.value?.trim().toUpperCase();
-    const telefono = document.getElementById("telefono")?.value?.trim();
+    const codigo = toId(document.getElementById("codigo")?.value);
+    const telefono = (document.getElementById("telefono")?.value || "").trim();
     const boveda = document.getElementById("boveda-seleccionada")?.value;
 
     if (!/^[A-Z0-9]{8}$/.test(codigo || "")) return alert("Código inválido.");
+    // Tus reglas aceptan 8–15, tú validas 10. Bien.
     if (!/^\d{10}$/.test(telefono || "")) return alert("Teléfono inválido (10 dígitos).");
     if (!["madera", "cristal", "plateada", "dorada"].includes(boveda)) return alert("Bóveda inválida.");
 
     try {
-      // Verifica existencia y estado del código
-      const codigoRef = doc(db, "codigos", codigo);
-      const codigoSnap = await getDoc(codigoRef);
-      if (!codigoSnap.exists()) return alert("Este código no existe.");
-      if (codigoSnap.data().estado === "usado") return alert("Este código ya fue usado.");
-
-      // Canje atómico: actualiza codigos y crea documento en la bóveda
-      const batch = writeBatch(db);
-
-      batch.update(codigoRef, {
-        estado: "usado",
-        telefono: telefono,
-        boveda: boveda
-      });
-
+      const codigoRef  = doc(db, "codigos", codigo);
       const destinoRef = doc(collection(db, boveda), codigo);
-      batch.set(destinoRef, {
-        codigo: codigo,
-        telefono: telefono,
-        registrado: serverTimestamp()
-      });
 
-      await batch.commit();
+      // Transacción: o todo o nada
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(codigoRef);
+        if (!snap.exists()) throw new Error("NO_EXISTE");
+
+        const data = snap.data() || {};
+        const estadoActual = (data.estado || "").toLowerCase();
+        if (estadoActual === "usado") throw new Error("YA_USADO");
+
+        // === IMPORTANTE ===
+        // Cumple EXACTAMENTE las reglas del flujo A (bóvedas):
+        // Solo estos 4 campos y tipos correctos.
+        tx.update(codigoRef, {
+          estado: "usado",
+          telefono,              // string 8–15
+          boveda,                // una de las 4
+          registradoAt: serverTimestamp()
+        });
+
+        // Crear registro en la colección de la bóveda
+        // Requisitos de reglas: codigo==docId, registrado (timestamp o string) y telefono string
+        tx.set(destinoRef, {
+          codigo,
+          telefono,
+          registrado: serverTimestamp()
+        });
+      });
 
       // UI
       agregarTarjeta(boveda, codigo, telefono);
@@ -127,12 +132,15 @@ if (form) {
       document.getElementById("overlay").style.display = "block";
     } catch (err) {
       console.error(err);
-      alert("No se pudo registrar el código. Verifica los datos e inténtalo de nuevo.");
+      let msg = "No se pudo registrar el código. Verifica los datos e inténtalo de nuevo.";
+      if (err?.message === "NO_EXISTE") msg = "Este código no existe.";
+      if (err?.message === "YA_USADO") msg = "Este código ya fue usado.";
+      alert(msg);
     }
   });
 }
 
-// Cierra modal de éxito (ya existía)
+// Cierra modal de éxito
 window.closeModal = function () {
   document.getElementById("customModal").style.display = "none";
   document.getElementById("overlay").style.display = "none";
@@ -159,10 +167,7 @@ async function cargarRanking() {
   const updEl = document.getElementById("ranking-updated");
   const ts = datos.actualizado?.toDate ? datos.actualizado.toDate() : null;
   if (updEl && ts) {
-    const fmt = new Intl.DateTimeFormat("es-MX", {
-      dateStyle: "short",
-      timeStyle: "short"
-    }).format(ts);
+    const fmt = new Intl.DateTimeFormat("es-MX", { dateStyle: "short", timeStyle: "short" }).format(ts);
     updEl.textContent = `Última actualización: ${fmt}`;
   } else if (updEl) {
     updEl.textContent = "";
@@ -171,11 +176,7 @@ async function cargarRanking() {
   // Lista ordenada
   const lista = Object.entries(datos)
     .filter(([k]) => ["tec", "prepa1", "cehum", "upefim"].includes(k))
-    .map(([id, gomitas]) => ({
-      id,
-      nombre: nombres[id] || id,
-      gomitas
-    }))
+    .map(([id, gomitas]) => ({ id, nombre: nombres[id] || id, gomitas }))
     .sort((a, b) => b.gomitas - a.gomitas);
 
   const contenedor = document.getElementById("ranking-container");
@@ -196,13 +197,9 @@ cargarRanking();
 function agregarTarjeta(boveda, codigo, telefono) {
   const contenedor = document.getElementById(`tarjetas-${boveda}`);
   if (!contenedor) return;
-
   const tarjeta = document.createElement("div");
   tarjeta.classList.add("card-codigo");
-  tarjeta.innerHTML = `
-    <strong>Código:</strong> ${codigo}<br>
-    <strong>Teléfono:</strong> ${telefono}
-  `;
+  tarjeta.innerHTML = `<strong>Código:</strong> ${codigo}<br><strong>Teléfono:</strong> ${telefono}`;
   contenedor.prepend(tarjeta);
 }
 window.agregarTarjeta = agregarTarjeta;
@@ -214,33 +211,27 @@ const lockIcon = document.getElementById("lock-icon");
 if (lockIcon) {
   lockIcon.addEventListener("click", () => {
     const usuario = prompt("Usuario:");
-    if (usuario == null) return; // Cancelado
+    if (usuario == null) return;
     const contrasena = prompt("Contraseña:");
-    if (contrasena == null) return; // Cancelado
+    if (contrasena == null) return;
 
     if (usuario === "admin" && contrasena === "1234") {
-      // Acceso al panel de administrador
       sessionStorage.setItem("auth", "true");
       window.location.href = "admin.html";
     } else if (usuario === "panel" && contrasena === "12345") {
-      // Acceso directo al panel de ventas
       sessionStorage.setItem("ventas_auth", "true");
       window.location.href = "ventas.html";
     } else if (usuario === "vendedor" && contrasena === "123456") {
-      // Acceso directo al panel de ventas
       sessionStorage.setItem("vendedor_auth", "true");
       window.location.href = "premios.html";
-    }else if (usuario === "registroven" && contrasena === "1234567") {
-      // Acceso directo al panel de ventas
+    } else if (usuario === "registroven" && contrasena === "1234567") {
       sessionStorage.setItem("registro_auth", "true");
       window.location.href = "registro-premios.html";
-    }
-    else {
+    } else {
       alert("Acceso denegado. Usuario o contraseña incorrectos.");
     }
   });
 }
-
 
 // =====================
 //  MODAL INFO
@@ -252,7 +243,6 @@ if (infoIcon) {
     document.getElementById("overlay-info").style.display = "block";
   });
 }
-
 window.cerrarInfoModal = function () {
   document.getElementById("infoModal").style.display = "none";
   document.getElementById("overlay-info").style.display = "none";
